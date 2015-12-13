@@ -6,6 +6,7 @@ import com.github.tminglei.slickpg.composite.Struct
 import com.koadr.PgCompositeSupportSuite.Tuple2tStruct
 import org.joda.time.{DateTimeZone, DateTime}
 import slick.driver.PostgresDriver
+import slick.jdbc.PositionedResult
 import slick.lifted.RepShapeImplicits
 import scala.reflect.runtime.{universe => u}
 import java.sql.Timestamp
@@ -23,7 +24,13 @@ trait DBProfile extends PostgresDriver with PgCompositeSupport with PgArraySuppo
   val tsFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
   def ts(str: String) = new Timestamp(tsFormat.parse(str).getTime)
 
-  override val api = new API with ArrayImplicits with CompositeImplicits with MyArrayImplicitsPlus {}
+  override val api =
+    new API
+      with ArrayImplicits
+      with CompositeImplicits
+      with MyArrayImplicitsPlus
+      with GenericExtensions
+      with CommonTypeSupport {}
 
   trait CompositeImplicits {
     utils.TypeConverters.register[DateTime,String](d => tsFormat.format(new Timestamp(d.getMillis)))
@@ -33,7 +40,10 @@ trait DBProfile extends PostgresDriver with PgCompositeSupport with PgArraySuppo
   }
 
   trait MyArrayImplicitsPlus {
-    implicit val simpleDateTimeListTypeMapper = new SimpleArrayJdbcType[DateTime]("timestamp").to(_.toList)
+    implicit val simpleDateTimeListTypeMapper = new SimpleArrayJdbcType[DateTime]("timestamp").basedOn[Timestamp](
+    d => new Timestamp(d.getMillis),
+    ts => new DateTime(ts.getTime)
+    ).to(_.toList)
   }
 }
 

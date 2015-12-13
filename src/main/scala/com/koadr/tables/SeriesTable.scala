@@ -1,7 +1,5 @@
 package com.koadr.tables
 
-import java.sql.Timestamp
-
 import com.koadr.CommonPostgresProfile.api._
 import com.koadr.PgCompositeSupportSuite.Tuple2tStruct
 import org.joda.time.DateTime
@@ -10,11 +8,6 @@ import org.joda.time.DateTime
 object SeriesTable extends SeriesTable
 
 private[tables] trait SeriesTable {
-  implicit def dateTime  =
-    MappedColumnType.base[DateTime, Timestamp](
-        dt => new Timestamp(dt.getMillis),
-        ts => new DateTime(ts.getTime)
-  )
 
   case class SeriesWithCompositeRow(id: Int,code: String,ident1Id: Int,ident2Id: Int, series: List[Tuple2tStruct])
   case class SeriesWithCompositeInsertRow(code: String,ident1Id: Int,ident2Id: Int, series: List[Tuple2tStruct])
@@ -55,8 +48,8 @@ private[tables] trait SeriesTable {
     def * = (id,code,ident1Id, ident2Id) <> (SeriesRow.tupled, SeriesRow.unapply)
   }
 
-  case class SeriesPointRow(id: Int,date: DateTime,value:Double,timeSeriesId: Int)
-  case class SeriesPointInsertRow(date: DateTime,value:Double,timeSeriesId: Int)
+  case class SeriesPointRow(id: Int,date: DateTime,value:Double,seriesId: Int)
+  case class SeriesPointInsertRow(date: DateTime,value:Double,seriesId: Int)
   class SeriesPoint(tag: Tag) extends Table[SeriesPointRow](tag, "series-point") {
     def id = column[Int]("id", O.AutoInc, O.PrimaryKey)
     def date = column[DateTime]("date")

@@ -7,6 +7,7 @@ import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.time.{Minutes, Milliseconds,Span}
 import org.scalatest.{BeforeAndAfter, FreeSpec}
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Future
 
 
 class SeriesTest extends FreeSpec with CommonSeeder with BeforeAndAfter with ScalaFutures {
@@ -26,7 +27,13 @@ class SeriesTest extends FreeSpec with CommonSeeder with BeforeAndAfter with Sca
   val arbCode = "arbCode"
   val arbId = 1
   val arbDouble = 0.3
-  val arbTuple2Structs = List.fill(1200)(Tuple2tStruct(DateTime.now(),arbDouble))
+  var currDateTime = new DateTime()
+  var currValue = 0.1
+  val arbTuple2Structs = List.fill(1200){
+    currDateTime = currDateTime.plusMonths(1)
+    currValue += 0.1
+    Tuple2tStruct(currDateTime,currValue)
+  }
 
   "Series" - {
     "with composite for realistic series data" ignore {
@@ -36,13 +43,13 @@ class SeriesTest extends FreeSpec with CommonSeeder with BeforeAndAfter with Sca
       } yield {
         SeriesTable.SeriesWithCompositeInsertRow(arbCode,arbId,arbId,arbTuple2Structs)
       }
-      val createdseries = db run {
-        for {
-          _ <- sProj ++= rows
+
+      whenReady(
+        db.run((for {
+        _ <- sProj ++= rows
           series <- SeriesTable.SeriesWithComposite.result
-        } yield series
-      }
-      whenReady(createdseries) {println}
+      } yield series))) {identity}
+
     }
 
     "with array times and array values for realistic series data" in {
@@ -54,14 +61,14 @@ class SeriesTest extends FreeSpec with CommonSeeder with BeforeAndAfter with Sca
             SeriesTable.SeriesWithArraysInsertRow(arbCode, arbId, arbId, dates, values)
           }
       import org.scalameter._
-        val createseries =
+        lazy val createseries =
           db.run{
             for {
               _ <- sProj ++= rows
             } yield ()
           }
 
-        val allseries =
+        lazy val allseries =
           db run {
             for {
               series <- SeriesTable.SeriesWithArrays.result
@@ -73,7 +80,7 @@ class SeriesTest extends FreeSpec with CommonSeeder with BeforeAndAfter with Sca
             val time = measure {
               whenReady(allseries){identity}
             }
-            // Ran ~0.334188 ms
+            // Ran ~1083.845838ms
             println("*****" * 30)
             println("WITH ARRAY")
             println(time)
@@ -83,10 +90,12 @@ class SeriesTest extends FreeSpec with CommonSeeder with BeforeAndAfter with Sca
     }
 
     "with series data in separate table" in {
+        var currDateTime = new DateTime()
+        var currValue = 0.1
         val sProj = SeriesTable.Series.map(_.columnsForInsert).returning(SeriesTable.Series.map(_.id))
         val sPointProj = SeriesTable.SeriesPoint.map(_.columnsForInsert)
         val sRows = for {
-          i <- 1 to 277
+          _ <- 1 to 277
         } yield {
             SeriesTable.SeriesInsertRow(arbCode,arbId,arbId)
           }
@@ -94,11 +103,13 @@ class SeriesTest extends FreeSpec with CommonSeeder with BeforeAndAfter with Sca
           sId <- 1 to 277
           _ <- 1 to 1200
         } yield {
-            SeriesTable.SeriesPointInsertRow(DateTime.now(),0.2,sId)
+            currDateTime = currDateTime.plusMonths(1)
+            currValue += 0.1
+            SeriesTable.SeriesPointInsertRow(currDateTime,currValue,sId)
           }
 
         import org.scalameter._
-        val createTS =
+        lazy val createTS =
           db.run{
             for {
               sIds <- sProj ++= sRows
@@ -106,26 +117,79 @@ class SeriesTest extends FreeSpec with CommonSeeder with BeforeAndAfter with Sca
             } yield ()
           }
 
-        val allseries =
+        lazy val allseries: Future[Seq[(SeriesTable.SeriesRow, List[Double], List[DateTime])]] =
           db run {
             (for {
-              sP <- SeriesTable.SeriesPoint
-              s <- sP.seriesFk
-            } yield (s,sP)).result
+              sT <- SeriesTable.SeriesPoint
+              s <- sT.seriesFk
+              if s.id === 1
+            } yield (s,sT))
+              .sortBy(_._2.date)
+              .groupBy(_._1)
+              .map {
+                case (series, rows) =>
+                  (series, rows.map(_._2.value).arrayAgg(), rows.map(_._2.date).arrayAgg())
+            }.result
           }
 
         whenReady(createTS) {
           _ =>
             val time = measure {
-              whenReady(allseries){identity}
+              whenReady(allseries){
+                series =>
+                  def isSorted(l:List[Double]) = (l, l.tail).zipped.forall(_ <= _)
+                  def isDateSorted(l:List[DateTime]) = (l, l.tail).zipped.forall(_ isBefore _)
+                  case class TsPoint(date: DateTime,value: Double)
+                  val tsPoints = series.head._3.zip(series.head._2).map{case (time,value) => TsPoint(time,value)}
+                  assert(tsPoints.sortBy(_.value) == tsPoints)
+                  assert(tsPoints.sortBy(_.date.getMillis) == tsPoints)
+                  assert(tsPoints.size == 1200)
+                  assert(isSorted(tsPoints.map(_.value)))
+                  assert(isDateSorted(tsPoints.map(_.date)))
+              }
             }
-            // Ran around ~0.60455 ms
+            // Ran around ~107.303741 ms
             println("*****" * 30)
             println("WITH TWO TABLES")
             println(time)
             println("*****" * 30)
         }
 
+    }
+
+    "migrates series with composite table over to series-reg and series-point table" ignore {
+      val seriesIds = db.run(SeriesTable.SeriesWithComposite.map(_.id).result)
+
+      whenReady(seriesIds) {
+        ids =>
+          val insertedRows = for {
+            idSeries <- ids
+          } yield {
+              val seriesById = SeriesTable.SeriesWithComposite.filter(_.id === idSeries).map(sC => (sC.id,sC.series)).result.head
+              def insertSeriesPointTable(seriesWithId: (Int,List[Tuple2tStruct])) = {
+                val (seriesId,series) = seriesWithId
+                val sPointProj = SeriesTable.SeriesPoint.map(_.columnsForInsert)
+                val insertRows = for {
+                  s <- series
+                } yield SeriesTable.SeriesPointInsertRow(s.date,s.value, seriesId)
+                sPointProj ++= insertRows
+              }
+              lazy val createdSeriesPoints = db run {
+                for {
+                  seriesTup <- seriesById
+                  (id,series) = seriesTup
+                  _ <- insertSeriesPointTable(seriesTup)
+                } yield series.size
+              }
+              whenReady(createdSeriesPoints) {
+                size =>
+                  println(s"$size series points for id $idSeries have been created")
+                  size
+              }
+            }
+
+          println(s"Total of ${insertedRows.sum} were created")
+      }
     }
   }
 }

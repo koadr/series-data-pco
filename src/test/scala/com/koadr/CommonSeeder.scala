@@ -1,12 +1,11 @@
 package com.koadr
 
 import com.koadr.tables.SeriesTable
+import org.joda.time.DateTime
 import scala.concurrent.ExecutionContext.Implicits.global
 import CommonPostgresProfile.api._
 
-
 trait CommonSeeder extends DBProfile {
-
   val db = DbHolder.db
 
   def allTables =
